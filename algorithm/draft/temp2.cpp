@@ -440,12 +440,12 @@ int main() {
     RoadNetwork road_network;
     
     // Define some locations (in a real app, these would be actual coordinates)
-    GeoCoordinate depot(26.466471045524983, 73.11222367206733);
-    GeoCoordinate loc1(26.47523876708196, 73.11710999950559);
-    GeoCoordinate loc2(26.475575331906825, 73.12028960504121);
-    GeoCoordinate loc3(26.478363194734854, 73.11141385027695);
-    GeoCoordinate loc4(26.409415827510088, 73.05786881559627);
-    GeoCoordinate loc5(26.474657296139867, 73.11134106607929);
+    GeoCoordinate depot(26.466284587413128, 73.11177376078871);
+    GeoCoordinate loc1(26.23837109674883, 73.00619526985768);
+    GeoCoordinate loc2(26.219393744183503, 73.04135354904878);
+    GeoCoordinate loc3(26.47520225789069, 73.11708515743788);
+    GeoCoordinate loc4(26.476457578760822, 73.11990278504588);
+    GeoCoordinate loc5(26.474167116435424, 73.11186391712427);
     
     // Add edges to the road network (with distances in km)
     road_network.addEdge(depot, loc1, 1.5);
@@ -512,18 +512,7 @@ int main() {
         }
         std::cout << "Updated Total Distance: " << vehicles[0].total_distance << " km\n";
     }
-    
-    // 6. Demonstrate all-pairs shortest paths with Floyd-Warshall
-    std::cout << "\n=== Floyd-Warshall All-Pairs Shortest Paths ===\n";
-    auto all_pairs_dist = road_network.floydWarshall();
-    for (const auto& entry : all_pairs_dist) {
-    const auto& pair = entry.first;
-    double dist = entry.second;
 
-    std::cout << "From (" << pair.first.latitude << ", " << pair.first.longitude << ") to "
-              << "(" << pair.second.latitude << ", " << pair.second.longitude << "): "
-              << dist << " km\n";
-}
 
 
     
