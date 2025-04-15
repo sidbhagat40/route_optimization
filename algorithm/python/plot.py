@@ -2,18 +2,14 @@ import pandas as pd
 import networkx as nx
 import folium
 from itertools import pairwise
-import ast
-from typing import List, Tuple
 import colorsys
 import webbrowser
 import os
-import time
+import glob
+from typing import Dict, List, Tuple
 
 def parse_linestring(geom_str: str) -> List[Tuple[float, float]]:
-    """
-    Parse LINESTRING coordinates from WKT format
-    Returns list of (lat, lon) tuples
-    """
+    """Parse LINESTRING coordinates from WKT format"""
     if pd.isna(geom_str) or not isinstance(geom_str, str):
         return []
 
@@ -25,50 +21,59 @@ def parse_linestring(geom_str: str) -> List[Tuple[float, float]]:
         return []
 
 def load_osm_graph(nodes_file: str, edges_file: str) -> nx.MultiDiGraph:
-    """
-    Create a NetworkX graph from local OSM CSV files
-    Args:
-        nodes_file: Path to nodes.csv
-        edges_file: Path to edges.csv
-    Returns:
-        NetworkX MultiDiGraph representing the road network
-    """
+    """Create a NetworkX graph from local OSM CSV files with proper type handling"""
     G = nx.MultiDiGraph()
 
-    # Load nodes
+    # Load nodes with proper type conversion
     print(f"Loading nodes from {nodes_file}...")
     nodes_df = pd.read_csv(nodes_file)
+    
+    # Convert osmid to string and coordinates to float
+    nodes_df['osmid'] = nodes_df['osmid'].astype(str)
+    nodes_df['x'] = pd.to_numeric(nodes_df['x'], errors='coerce')
+    nodes_df['y'] = pd.to_numeric(nodes_df['y'], errors='coerce')
+    
+    # Drop any rows with invalid coordinates
+    nodes_df = nodes_df.dropna(subset=['x', 'y'])
+    
     for _, row in nodes_df.iterrows():
-        G.add_node(row['osmid'], y=row['y'], x=row['x'])
+        G.add_node(str(row['osmid']), y=float(row['y']), x=float(row['x']))
     print(f"Loaded {len(nodes_df)} nodes")
 
-    # Load edges
+    # Load edges with proper type conversion
     print(f"Loading edges from {edges_file}...")
-    edges_df = pd.read_csv(edges_file, low_memory=False)  # Added low_memory=False to prevent DtypeWarning
+    edges_df = pd.read_csv(edges_file, low_memory=False)
+    
+    # Convert edge endpoints to strings and length to float
+    edges_df['u'] = edges_df['u'].astype(str)
+    edges_df['v'] = edges_df['v'].astype(str)
+    edges_df['length'] = pd.to_numeric(edges_df['length'], errors='coerce')
+    
+    # Drop any rows with invalid lengths
+    edges_df = edges_df.dropna(subset=['length'])
+    
     for _, row in edges_df.iterrows():
-        # Add forward edge
         G.add_edge(
-            row['u'],
-            row['v'],
+            str(row['u']),
+            str(row['v']),
             key=row['key'],
-            osmid=row['osmid'],
+            osmid=str(row['osmid']),
             highway=row['highway'],
             name=row['name'],
-            length=row['length'],
+            length=float(row['length']),  # Ensure length is float
             oneway=row['oneway'],
             geometry=row['geometry']
         )
 
-        # Add reverse edge if not oneway
         if not row['oneway']:
             G.add_edge(
-                row['v'],
-                row['u'],
+                str(row['v']),
+                str(row['u']),
                 key=row['key'],
-                osmid=row['osmid'],
+                osmid=str(row['osmid']),
                 highway=row['highway'],
                 name=row['name'],
-                length=row['length'],
+                length=float(row['length']),  # Ensure length is float
                 oneway=False,
                 geometry=row['geometry']
             )
@@ -76,321 +81,224 @@ def load_osm_graph(nodes_file: str, edges_file: str) -> nx.MultiDiGraph:
 
     return G
 
-def generate_gradient_colors(segments_count: int, start_color: tuple = (0, 0.7, 1), end_color: tuple = (0, 1, 0.7)) -> List[str]:
-    """
-    Generate a smooth gradient of colors for route segments
-    Args:
-        segments_count: Number of segments to generate colors for
-        start_color: Starting color in HSV format (h, s, v)
-        end_color: Ending color in HSV format (h, s, v)
-    Returns:
-        List of hex color codes
-    """
-    colors = []
+def generate_warehouse_colors(num_warehouses: int) -> List[str]:
+    """Generate visually distinct colors for different warehouses"""
+    colors = [
+        '#E41A1C', '#377EB8', '#4DAF4A', '#984EA3', '#FF7F00',
+        '#FFFF33', '#A65628', '#F781BF', '#999999'
+    ]
+    
+    if num_warehouses > len(colors):
+        for i in range(len(colors), num_warehouses):
+            h = i / num_warehouses
+            s, v = 0.8, 0.9
+            r, g, b = colorsys.hsv_to_rgb(h, s, v)
+            colors.append(f'#{int(r*255):02x}{int(g*255):02x}{int(b*255):02x}')
+    
+    return colors[:num_warehouses]
 
-    # Generate gradient in HSV space for smoother transitions
-    for i in range(segments_count):
-        # Calculate position in gradient (0 to 1)
-        t = i / max(1, segments_count - 1)
-
-        # Interpolate between start and end color
-        h = start_color[0] + t * (end_color[0] - start_color[0])
-        s = start_color[1] + t * (end_color[1] - start_color[1])
-        v = start_color[2] + t * (end_color[2] - start_color[2])
-
-        # Convert HSV to RGB
-        r, g, b = colorsys.hsv_to_rgb(h, s, v)
-
-        # Convert RGB to hex
-        hex_color = f'#{int(r*255):02x}{int(g*255):02x}{int(b*255):02x}'
-        colors.append(hex_color)
-
-    return colors
-
-def plot_route_with_geometry(
+def plot_multiple_routes(
     G: nx.MultiDiGraph,
-    node_sequence: List[int],
-    output_file: str = 'osm_route.html',
+    warehouse_routes: Dict[str, List[str]],
+    warehouse_names: Dict[str, str],
+    output_file: str = 'multi_warehouse_routes.html',
     map_style: str = 'OpenStreetMap'
 ) -> folium.Map:
-    """
-    Plot route through specified nodes using actual road geometries
-    with animated flow to show direction of travel
-    Args:
-        G: Road network graph
-        node_sequence: List of OSM node IDs to visit in order
-        output_file: Path to save HTML map
-        map_style: Base map style to use ('OpenStreetMap', 'Stamen Terrain', etc.)
-    Returns:
-        folium.Map object with the route plotted
-    """
-    # Try to import folium plugins
+    """Plot multiple warehouse routes with proper type checking"""
     try:
         import folium.plugins
         HAS_PLUGINS = True
     except ImportError:
         HAS_PLUGINS = False
-        print("folium.plugins not available. Some map features will be disabled.")
-        print("To enable all features, install using: pip install folium")
 
-    # Store route segments separately for animation
-    route_segments = []
-    segment_names = []
-    missing_nodes = set()
-    missing_edges = set()
+    # Verify all warehouse nodes exist
+    missing_warehouses = [wid for wid in warehouse_routes if wid not in G]
+    if missing_warehouses:
+        print(f"Warning: Missing warehouse nodes: {missing_warehouses}")
 
-    # Calculate route segments between each pair of nodes
-    for i, (u, v) in enumerate(pairwise(node_sequence)):
-        segment_coords = []
-        try:
-            # Verify nodes exist
-            if u not in G or v not in G:
-                raise KeyError(f"Nodes not found: {u} or {v}")
+    warehouse_base_colors = generate_warehouse_colors(len(warehouse_routes))
+    
+    # Calculate map center
+    center_points = []
+    for warehouse_id, route in warehouse_routes.items():
+        if route and warehouse_id in G.nodes:
+            node = G.nodes[warehouse_id]
+            center_points.append((float(node['y']), float(node['x'])))  # Ensure float
+    
+    map_center = (28.6139, 77.2090)  # Default Delhi center
+    if center_points:
+        avg_lat = sum(p[0] for p in center_points) / len(center_points)
+        avg_lon = sum(p[1] for p in center_points) / len(center_points)
+        map_center = (float(avg_lat), float(avg_lon))  # Ensure float
 
-            # Find shortest path edges
-            path = nx.shortest_path(G, u, v, weight='length')
-            edges = list(zip(path[:-1], path[1:]))
+    # Create base map
+    m = folium.Map(location=map_center, zoom_start=12, tiles=map_style)
 
-            # Try to get edge name for the segment
+    # Process each warehouse route
+    for w_idx, (warehouse_id, node_sequence) in enumerate(warehouse_routes.items()):
+        warehouse_name = warehouse_names.get(warehouse_id, f"Warehouse {w_idx+1}")
+        route_group = folium.FeatureGroup(name=f"Route: {warehouse_name}").add_to(m)
+        base_color = warehouse_base_colors[w_idx]
+        
+        route_segments = []
+        
+        # Calculate route segments
+        for i, (u, v) in enumerate(pairwise(node_sequence)):
+            segment_coords = []
             try:
-                edge_name = G[path[0]][path[1]][0].get('name', f'Segment {i+1}')
-                if pd.isna(edge_name) or edge_name == '':
-                    edge_name = f'Segment {i+1}'
-            except:
-                edge_name = f'Segment {i+1}'
+                if str(u) not in G or str(v) not in G:
+                    raise KeyError(f"Nodes not found: {u} or {v}")
 
-            segment_names.append(edge_name)
+                path = nx.shortest_path(G, str(u), str(v), weight='length')
+                
+                # Get coordinates for each segment
+                for u_edge, v_edge in pairwise(path):
+                    edge_data = G.get_edge_data(u_edge, v_edge)
+                    if edge_data:
+                        for key, data in edge_data.items():
+                            if 'geometry' in data:
+                                segment_coords.extend(parse_linestring(data['geometry']))
+                                break
+                        else:
+                            # Fallback to straight line
+                            u_node = G.nodes[u_edge]
+                            v_node = G.nodes[v_edge]
+                            segment_coords.extend([
+                                (float(u_node['y']), float(u_node['x'])),
+                                (float(v_node['y']), float(v_node['x']))
+                            ])
 
-            # Get coordinates from edge geometries
-            for u_edge, v_edge in edges:
-                edge_data = G.get_edge_data(u_edge, v_edge)
-                if not edge_data:
-                    missing_edges.add((u_edge, v_edge))
-                    continue
+            except (nx.NetworkXNoPath, KeyError) as e:
+                print(f"Warning: {e}. Drawing straight line between {u} and {v}")
+                try:
+                    u_node = G.nodes[str(u)]
+                    v_node = G.nodes[str(v)]
+                    segment_coords.extend([
+                        (float(u_node['y']), float(u_node['x'])),
+                        (float(v_node['y']), float(v_node['x']))
+                    ])
+                except KeyError:
+                    print(f"Could not draw segment between nodes {u} and {v}")
 
-                for key, data in edge_data.items():
-                    if 'geometry' in data:
-                        segment_coords.extend(parse_linestring(data['geometry']))
-                        break
-                else:
-                    # Fallback to straight line if no geometry
-                    u_data = G.nodes[u_edge]
-                    v_data = G.nodes[v_edge]
-                    segment_coords.extend([(u_data['y'], u_data['x']),
-                                        (v_data['y'], v_data['x'])])
+            if segment_coords:
+                route_segments.append(segment_coords)
 
-        except (nx.NetworkXNoPath, KeyError) as e:
-            print(f"Warning: {e}. Drawing straight line between {u} and {v}")
-            try:
-                u_data = G.nodes[u]
-                v_data = G.nodes[v]
-                segment_coords.extend([(u_data['y'], u_data['x']),
-                                    (v_data['y'], v_data['x'])])
-            except:
-                print(f"Could not draw segment between nodes {u} and {v}")
-
-        # Add the segment if it has coordinates
-        if segment_coords:
-            route_segments.append(segment_coords)
-
-    # Create map centered on first segment's starting point
-    if not route_segments or not route_segments[0]:
-        raise ValueError("No valid route coordinates found")
-
-    # Create the base map with the primary style
-    m = folium.Map(
-        location=route_segments[0][0],
-        zoom_start=14,
-        tiles=map_style,
-        control_scale=True
-    )
-
-    # Add alternative tile layers with a layer control
-    tile_options = {
-        'OpenStreetMap': 'OpenStreetMap',
-        'Cartodb Positron': 'CartoDB Positron',
-        'Cartodb Dark Matter': 'CartoDB Dark Matter',
-        'Stamen Terrain': 'Stamen Terrain',
-        'Stamen Toner': 'Stamen Toner',
-        'Stamen Watercolor': 'Stamen Watercolor',
-        'ESRI World Street': 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}',
-        'ESRI World Imagery': 'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'
-    }
-
-    # Add all tile layers except the base one
-    for name, url in tile_options.items():
-        if name != map_style:
-            folium.TileLayer(url, name=name, attr="Map tiles").add_to(m)
-
-    # Create a feature group for routes
-    route_group = folium.FeatureGroup(name="Route Segments").add_to(m)
-
-    # Generate beautiful gradient colors for segments
-    colors = generate_gradient_colors(len(route_segments))
-
-    # Get all coordinates for full route (for non-animated fallback)
-    all_coords = [coord for segment in route_segments for coord in segment]
-
-    # Add the animated segments (if plugins available)
-    if HAS_PLUGINS:
-        # Add animated segments with AntPath
-        for i, (segment, name) in enumerate(zip(route_segments, segment_names)):
-            # Use gradient color
-            color = colors[i]
-
-            # Add the animated path with improved styling
-            folium.plugins.AntPath(
-                locations=segment,
-                color=color,
-                weight=6,
-                opacity=0.9,
-                tooltip=f"Segment {i+1}: {name}",
-                delay=800,
-                dash_array=[10, 15],
-                popup=f"Segment {i+1}: {name}",
-                pulse_color='#FFFFFF'
+        # Add segments to map
+        if HAS_PLUGINS:
+            for segment in route_segments:
+                folium.plugins.AntPath(
+                    locations=segment,
+                    color=base_color,
+                    weight=5,
+                    opacity=0.8,
+                    tooltip=warehouse_name,
+                    delay=800
+                ).add_to(route_group)
+        else:
+            all_coords = [coord for segment in route_segments for coord in segment]
+            folium.PolyLine(
+                locations=all_coords,
+                color=base_color,
+                weight=4,
+                opacity=0.7,
+                tooltip=warehouse_name
             ).add_to(route_group)
 
-    else:
-        # Fallback: Add non-animated polyline if plugins not available
-        folium.PolyLine(
-            locations=all_coords,
-            color='#0078FF',
-            weight=5,
-            opacity=0.8,
-            tooltip="Route"
-        ).add_to(route_group)
+        # Add markers
+        for i, node_id in enumerate(node_sequence):
+            try:
+                node = G.nodes[str(node_id)]
+                if i == 0:  # Warehouse
+                    folium.Marker(
+                        location=[float(node['y']), float(node['x'])],
+                        popup=warehouse_name,
+                        icon=folium.Icon(color='red', icon='home')
+                    ).add_to(m)
+                else:  # Delivery point
+                    folium.CircleMarker(
+                        location=[float(node['y']), float(node['x'])],
+                        radius=6,
+                        popup=f"Delivery {i}",
+                        color=base_color,
+                        fill=True
+                    ).add_to(m)
+            except KeyError:
+                print(f"Warning: Node {node_id} not found in graph")
 
-    # Add markers for each node with custom icons and colors
-    for i, node_id in enumerate(node_sequence):
-        try:
-            node = G.nodes[node_id]
-
-            if i == 0:  # Start point
-                folium.Marker(
-                    location=[node['y'], node['x']],
-                    popup=f"Start: Node {node_id}",
-                    tooltip="Start",
-                    icon=folium.DivIcon(
-                        html=f"""
-                        <div style="background-color:#00c853; width:20px; height:20px;
-                             border-radius:50%; display:flex; align-items:center; justify-content:center;
-                             border:3px solid white; box-shadow:0 0 10px rgba(0,0,0,0.3);">
-                        </div>
-                        """
-                    )
-                ).add_to(m)
-            elif i == len(node_sequence)-1:  # End point
-                folium.Marker(
-                    location=[node['y'], node['x']],
-                    popup=f"End: Node {node_id}",
-                    tooltip="End",
-                    icon=folium.DivIcon(
-                        html=f"""
-                        <div style="background-color:#d50000; width:20px; height:20px;
-                             border-radius:50%; display:flex; align-items:center; justify-content:center;
-                             border:3px solid white; box-shadow:0 0 10px rgba(0,0,0,0.3);">
-                        </div>
-                        """
-                    )
-                ).add_to(m)
-            else:  # Waypoints
-                waypoint_color = colors[int((i / (len(node_sequence)-2)) * (len(colors)-1))]
-                folium.Marker(
-                    location=[node['y'], node['x']],
-                    popup=f"Waypoint {i}: Node {node_id}",
-                    tooltip=f"Waypoint {i}",
-                    icon=folium.DivIcon(
-                        html=f"""
-                        <div style="background-color:{waypoint_color}; width:16px; height:16px;
-                             border-radius:50%; display:flex; align-items:center; justify-content:center;
-                             border:2px solid white; box-shadow:0 0 8px rgba(0,0,0,0.3);">
-                        </div>
-                        """
-                    )
-                ).add_to(m)
-        except KeyError:
-            missing_nodes.add(node_id)
-
-    # Add warnings to map if needed
-    if missing_nodes:
-        folium.Marker(
-            location=route_segments[0][0],
-            icon=folium.DivIcon(
-                html=f"""<div style="background-color: rgba(255, 0, 0, 0.7); color: white; padding: 5px; border-radius: 5px; font-weight: bold">
-                    Warning: Missing nodes - {', '.join(map(str, missing_nodes))}
-                </div>"""
-            )
-        ).add_to(m)
-
-    if missing_edges:
-        folium.Marker(
-            location=route_segments[0][0],
-            icon=folium.DivIcon(
-                html=f"""<div style="background-color: rgba(255, 165, 0, 0.7); color: white; padding: 5px; border-radius: 5px; font-weight: bold; margin-top: 30px;">
-                    Warning: Missing edges - {len(missing_edges)} pairs
-                </div>"""
-            )
-        ).add_to(m)
-
-    # Calculate total distance
-    total_distance = sum(G[u][v][0]['length'] for u, v in pairwise(node_sequence)
-                         if u in G and v in G and v in G[u])
-
-    # Add extra features if plugins available
-    if HAS_PLUGINS:
-        folium.plugins.MiniMap(toggle_display=True).add_to(m)
-        folium.plugins.Fullscreen().add_to(m)
-        folium.plugins.MeasureControl(position='bottomleft', primary_length_unit='kilometers').add_to(m)
-
-    # Add layer control
-    folium.LayerControl(position='topright').add_to(m)
-
-    # Save to HTML (this will overwrite existing file)
+    folium.LayerControl().add_to(m)
     m.save(output_file)
     print(f"Map saved to {output_file}")
-
-    # Open in browser
-    file_path = f'file://{os.path.abspath(output_file)}'
-    webbrowser.open(file_path, new=2)  # new=2 opens in new tab if possible
-
+    webbrowser.open(f'file://{os.path.abspath(output_file)}')
     return m
+
+def process_route_files(route_file_pattern: str) -> Tuple[Dict[str, List[str]], Dict[str, str]]:
+    """Process route files with proper node ID handling"""
+    warehouse_routes = {}
+    warehouse_names = {}
+    
+    route_files = glob.glob(route_file_pattern)
+    print(f"Found {len(route_files)} route files")
+    
+    for i, file_path in enumerate(route_files):
+        try:
+            warehouse_name = f"Warehouse {i+1}"
+            filename = os.path.basename(file_path)
+            
+            if "warehouse" in filename.lower():
+                try:
+                    w_num = int(''.join(filter(str.isdigit, filename)))
+                    warehouse_name = f"Warehouse {w_num}"
+                except ValueError:
+                    pass
+            
+            with open(file_path, 'r') as f:
+                node_ids = [str(line.strip()) for line in f if line.strip()]
+            
+            if node_ids:
+                warehouse_id = str(node_ids[0])
+                warehouse_routes[warehouse_id] = node_ids
+                warehouse_names[warehouse_id] = warehouse_name
+                print(f"Loaded route for {warehouse_name} with {len(node_ids)} nodes")
+                
+        except Exception as e:
+            print(f"Error processing route file {file_path}: {e}")
+    
+    return warehouse_routes, warehouse_names
 
 if __name__ == "__main__":
     # Configuration
     NODES_FILE = '../../data/nodes.csv'
     EDGES_FILE = '../../data/edges.csv'
-    OUTPUT_FILE = 'osm_route.html'  # Consistent filename for overwriting
-
-    # Map style options
+    OUTPUT_FILE = 'multi_warehouse_routes.html'
     MAP_STYLE = 'OpenStreetMap'
-
-    # Your OSM node path
-    NODE_PATH = [
-        1827697182, 1826909611, 4233302722, 9884874655, 4229518792,
-        4065531426, 9880357040, 12110038882, 2575648598, 920829184,
-    ]
+    ROUTE_FILE_PATTERN = '../cpp/route_warehouse_*.txt'
 
     try:
-        # Load the road network
+        print("Starting route visualization...")
+        
+        # Load routes
+        warehouse_routes, warehouse_names = process_route_files(ROUTE_FILE_PATTERN)
+        if not warehouse_routes:
+            print("Error: No valid warehouse routes found")
+            exit(1)
+        
+        # Load road network with proper numeric conversion
         road_network = load_osm_graph(NODES_FILE, EDGES_FILE)
-
+        
         # Generate and display map
-        route_map = plot_route_with_geometry(
+        route_map = plot_multiple_routes(
             road_network,
-            NODE_PATH,
+            warehouse_routes,
+            warehouse_names,
             OUTPUT_FILE,
             map_style=MAP_STYLE
         )
 
-        print("\nRoute plotting completed successfully!")
-        print("Map automatically opened in your default browser")
-        print(f"Note: Each run overwrites {OUTPUT_FILE} with the latest version")
-
+        print("\nVisualization completed successfully!")
+        
     except Exception as e:
         print(f"\nError: {str(e)}")
         print("Please check:")
-        print("- Your CSV files exist in the correct location")
-        print("- The node IDs in NODE_PATH exist in your nodes.csv")
-        print("- The edges connect the nodes in your path")
-        print("- Required packages are installed: pandas, networkx, folium")
+        print("- CSV files exist and are properly formatted")
+        print("- Numeric columns (x, y, length) contain valid numbers")
+        print("- Node IDs are consistent between files")
