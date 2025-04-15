@@ -386,6 +386,22 @@ int main() {
          << calculateTourDistance(optimalTour, distanceMatrix) 
          << " meters" << endl;
 
+
+    // Save the node path to a file
+    ofstream outFile("route.txt");
+    if (!outFile.is_open()) {
+        cerr << "Error: Could not open route.txt for writing!" << endl;
+        return 1;
+    }
+
+    for (int idx : optimalTour) {
+        outFile << deliveryNodes[idx] << endl; // Write node ID, one per line
+    }
+    outFile.close();
+
+    cout << "\nRoute successfully saved to route.txt" << endl;
+
+
     
     
     return 0;
