@@ -157,7 +157,7 @@ def process_alternative_path_files(alt_path_pattern: str) -> Dict[str, List[List
     # First process existing files
     for file_path in alt_files:
         try:
-            filename = os.path.basename(file_path)
+            filename = os.path.basename(file_path)  
             
             # Parse filename to extract warehouse ID and route number
             parts = filename.replace('.txt', '').split('_')
