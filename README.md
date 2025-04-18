@@ -42,10 +42,14 @@ Standard C++ compiler supporting C++11 or above
 ## Usage
 
 **Step 1 :**  Generate Routes (C++)
+- Go to directory
 
 ```bash
-g++ -std=c++11 -o route_optimizer main.cpp
-./route_optimizer
+route_optimization\algorithm\cpp>
+```
+- Run the command
+```bash
+g++ main.cpp && .\a.exe
 ```
 This generates route files in the current directory or specified outputs/ folder.
 
