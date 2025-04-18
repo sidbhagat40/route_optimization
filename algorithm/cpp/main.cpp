@@ -12,8 +12,13 @@
 #include <unordered_set>
 #include <ctime>
 #include <map>
+#include <chrono>
 
 using namespace std;
+
+// Forward declarations
+double calculateTourDistance(const vector<int>& tour, const vector<vector<double>>& distMatrix);
+vector<int> solveTSP(const vector<vector<double>>& distMatrix);
 
 // Node structure
 struct Node {
@@ -35,11 +40,26 @@ struct Warehouse {
     vector<string> assignedDeliveries;
 };
 
+struct WarehouseDistInfo {
+    string warehouseId;
+    double distance;
+    vector<string> path;
+    bool isReachable;
+};
+
+struct PathOption {
+    string warehouseId;
+    vector<string> path;
+    double distance;
+};
+
 class RoadNetwork {
 private:
     unordered_map<string, Node> nodes;
     unordered_map<string, vector<pair<string, double>>> adjList;
-    
+    unordered_map<string, unordered_map<string, double>> distanceCache;
+    unordered_map<string, unordered_map<string, string>> pathCache;
+
 public:
     void addNode(const string& id, double x, double y) {
         nodes[id] = {x, y, id};
@@ -60,44 +80,39 @@ public:
         return nodes.at(id);
     }
 
-    // Calculate straight-line distance between two nodes
     double calculateHaversineDistance(const string& node1, const string& node2) const {
         if (nodes.find(node1) == nodes.end() || nodes.find(node2) == nodes.end()) {
             return numeric_limits<double>::infinity();
         }
 
-        // Get coordinates
-        double lat1 = nodes.at(node1).y;
-        double lon1 = nodes.at(node1).x;
-        double lat2 = nodes.at(node2).y;
-        double lon2 = nodes.at(node2).x;
+        const auto& n1 = nodes.at(node1);
+        const auto& n2 = nodes.at(node2);
+        
+        double lat1 = n1.y * M_PI / 180.0;
+        double lon1 = n1.x * M_PI / 180.0;
+        double lat2 = n2.y * M_PI / 180.0;
+        double lon2 = n2.x * M_PI / 180.0;
 
-        // Convert to radians
-        lat1 *= M_PI / 180.0;
-        lon1 *= M_PI / 180.0;
-        lat2 *= M_PI / 180.0;
-        lon2 *= M_PI / 180.0;
-
-        // Haversine formula
         double dlon = lon2 - lon1;
         double dlat = lat2 - lat1;
         double a = pow(sin(dlat/2), 2) + cos(lat1) * cos(lat2) * pow(sin(dlon/2), 2);
-        double c = 2 * asin(sqrt(a));
-        double r = 6371000; // Earth radius in meters
-        
-        return r * c;
+        return 6371000 * 2 * asin(sqrt(a));
     }
 
-    unordered_map<string, double> dijkstra(const string& start) {
+    pair<unordered_map<string, double>, unordered_map<string, string>> dijkstraWithPath(const string& start) {
+        if (distanceCache.find(start) != distanceCache.end()) {
+            return make_pair(distanceCache[start], pathCache[start]);
+        }
+
         unordered_map<string, double> distances;
+        unordered_map<string, string> previousNode;
+        
         for (const auto& node : nodes) {
             distances[node.first] = numeric_limits<double>::infinity();
         }
         distances[start] = 0.0;
 
-        priority_queue<pair<double, string>, 
-                     vector<pair<double, string>>,
-                     greater<pair<double, string>>> pq;
+        priority_queue<pair<double, string>, vector<pair<double, string>>, greater<pair<double, string>>> pq;
         pq.push({0.0, start});
 
         while (!pq.empty()) {
@@ -107,7 +122,6 @@ public:
             string currentNode = current.second;
 
             if (currentDist > distances[currentNode]) continue;
-
             if (adjList.find(currentNode) == adjList.end()) continue;
 
             for (const auto& neighbor : adjList.at(currentNode)) {
@@ -117,31 +131,53 @@ public:
 
                 if (newDist < distances[nextNode]) {
                     distances[nextNode] = newDist;
+                    previousNode[nextNode] = currentNode;
                     pq.push({newDist, nextNode});
                 }
             }
         }
 
-        return distances;
+        distanceCache[start] = distances;
+        pathCache[start] = previousNode;
+        return make_pair(distances, previousNode);
+    }
+
+    vector<string> getShortestPath(const string& start, const string& end) {
+        if (pathCache.find(start) == pathCache.end()) {
+            dijkstraWithPath(start);
+        }
+        
+        vector<string> path;
+        string current = end;
+        
+        while (current != start) {
+            path.push_back(current);
+            if (pathCache[start].find(current) == pathCache[start].end()) {
+                return {};
+            }
+            current = pathCache[start].at(current);
+        }
+        path.push_back(start);
+        reverse(path.begin(), path.end());
+        return path;
     }
 
     vector<vector<double>> createDistanceMatrix(const vector<string>& deliveryNodes) {
         size_t n = deliveryNodes.size();
         vector<vector<double>> matrix(n, vector<double>(n, -1));
 
+        #pragma omp parallel for
         for (size_t i = 0; i < n; ++i) {
-            cout << "Calculating routes from node " << deliveryNodes[i] << " (" << i+1 << "/" << n << ")..." << endl;
-            auto distances = dijkstra(deliveryNodes[i]);
+            auto result = dijkstraWithPath(deliveryNodes[i]);
+            auto& distances = result.first;
             
             for (size_t j = 0; j < n; ++j) {
                 if (i == j) {
                     matrix[i][j] = 0;
+                } else if (distances.find(deliveryNodes[j]) != distances.end()) {
+                    matrix[i][j] = distances[deliveryNodes[j]];
                 } else {
-                    if (distances.find(deliveryNodes[j]) != distances.end()) {
-                        matrix[i][j] = distances[deliveryNodes[j]];
-                    } else {
-                        matrix[i][j] = numeric_limits<double>::infinity();
-                    }
+                    matrix[i][j] = numeric_limits<double>::infinity();
                 }
             }
         }
@@ -166,26 +202,12 @@ public:
         
         count = min(count, (int)allNodes.size());
         
-        // Reservoir sampling algorithm for random selection
-        vector<string> result(count);
         random_device rd;
-        mt19937 gen(rd());
+        unsigned int seed = rd() ^ static_cast<unsigned int>(chrono::system_clock::now().time_since_epoch().count());
+        mt19937 gen(seed);
         
-        // Fill the reservoir
-        for (int i = 0; i < count; i++) {
-            result[i] = allNodes[i];
-        }
-        
-        // Replace elements with gradually decreasing probability
-        for (int i = count; i < allNodes.size(); i++) {
-            uniform_int_distribution<> dis(0, i);
-            int j = dis(gen);
-            if (j < count) {
-                result[j] = allNodes[i];
-            }
-        }
-        
-        return result;
+        shuffle(allNodes.begin(), allNodes.end(), gen);
+        return vector<string>(allNodes.begin(), allNodes.begin() + count);
     }
 
     void printGraphStats() const {
@@ -198,50 +220,49 @@ public:
                  << " (" << nodes.begin()->second.x 
                  << ", " << nodes.begin()->second.y << ")" << endl;
         }
-        
-        if (!adjList.empty()) {
-            cout << "Sample edge from: " << adjList.begin()->first 
-                 << " to " << adjList.begin()->second[0].first 
-                 << " length " << adjList.begin()->second[0].second << endl;
-        }
     }
 
-    // Assign deliveries to nearest warehouse based on Dijkstra distances
-    map<string, vector<string>> assignDeliveriesToWarehouses(
+    map<string, vector<string>> assignDeliveriesToWarehousesOptimized(
         const vector<string>& warehouseIds, 
         const vector<string>& deliveryNodes
     ) {
         map<string, vector<string>> assignments;
         
-        cout << "Assigning deliveries to warehouses..." << endl;
+        cout << "\nOptimized delivery assignment..." << endl;
         
-        // Initialize assignments
         for (const auto& warehouseId : warehouseIds) {
             assignments[warehouseId] = {};
         }
         
-        // For each delivery node, find the closest warehouse
         for (const auto& deliveryNode : deliveryNodes) {
-            string closestWarehouse;
-            double minDistance = numeric_limits<double>::infinity();
+            WarehouseDistInfo bestWarehouse;
+            bestWarehouse.isReachable = false;
+            bestWarehouse.distance = numeric_limits<double>::infinity();
             
-            // Calculate distances to all warehouses using Dijkstra
-            // First try network distance
             for (const auto& warehouseId : warehouseIds) {
-                auto distances = dijkstra(warehouseId);
+                auto result = dijkstraWithPath(warehouseId);
+                auto distances = result.first;
+                auto previous = result.second;
                 
-                // Check if there's a path to this delivery node
                 if (distances.find(deliveryNode) != distances.end() && 
-                    distances[deliveryNode] < minDistance) {
-                    minDistance = distances[deliveryNode];
-                    closestWarehouse = warehouseId;
+                    distances[deliveryNode] < numeric_limits<double>::infinity()) {
+                    
+                    double distance = distances[deliveryNode];
+                    
+                    if (distance < bestWarehouse.distance) {
+                        bestWarehouse.warehouseId = warehouseId;
+                        bestWarehouse.distance = distance;
+                        bestWarehouse.path = getShortestPath(warehouseId, deliveryNode);
+                        bestWarehouse.isReachable = true;
+                    }
                 }
             }
             
-            // If no path found with Dijkstra, use straight-line distance
-            if (minDistance == numeric_limits<double>::infinity()) {
-                cout << "Warning: No path found to delivery node " << deliveryNode 
-                     << " using Dijkstra. Using straight-line distance instead." << endl;
+            if (bestWarehouse.isReachable) {
+                assignments[bestWarehouse.warehouseId].push_back(deliveryNode);
+            } else {
+                string closestWarehouse;
+                double minDistance = numeric_limits<double>::infinity();
                 
                 for (const auto& warehouseId : warehouseIds) {
                     double dist = calculateHaversineDistance(warehouseId, deliveryNode);
@@ -250,22 +271,91 @@ public:
                         closestWarehouse = warehouseId;
                     }
                 }
+                
+                if (!closestWarehouse.empty()) {
+                    assignments[closestWarehouse].push_back(deliveryNode);
+                }
             }
-            
-            // Assign to the closest warehouse
-            if (!closestWarehouse.empty()) {
-                assignments[closestWarehouse].push_back(deliveryNode);
-                cout << "Assigned delivery " << deliveryNode << " to warehouse " 
-                     << closestWarehouse << " (distance: " << minDistance << "m)" << endl;
-            } else {
-                cerr << "Warning: Could not assign delivery " << deliveryNode 
-                     << " to any warehouse!" << endl;
-            }
+        }
+        
+        cout << "\nAssignment Summary:" << endl;
+        for (const auto& assignment : assignments) {
+            cout << "Warehouse " << assignment.first << ": " << assignment.second.size() << " deliveries" << endl;
         }
         
         return assignments;
     }
+
+    vector<PathOption> generateAlternativeRoutes(const string& warehouseId, 
+        const vector<string>& deliveryNodes,
+        const vector<int>& optimalTour,
+        const vector<vector<double>>& distMatrix,
+        int numAlternatives = 3) 
+    {
+        vector<PathOption> alternatives;
+
+        PathOption optimalPath;
+        optimalPath.warehouseId = warehouseId;
+        optimalPath.distance = calculateTourDistance(optimalTour, distMatrix);
+        for (int idx : optimalTour) {
+            optimalPath.path.push_back(deliveryNodes[idx]);
+        }
+        alternatives.push_back(optimalPath);
+
+        if (deliveryNodes.size() <= 3) {
+            return alternatives;
+        }
+
+        random_device rd;
+        mt19937 gen(rd());
+
+        // Strategy 1: Random shuffle
+        int attempts = 0;
+        const int maxAttempts = 100;
+        while (alternatives.size() < numAlternatives + 1 && attempts < maxAttempts) {
+            attempts++;
+            vector<int> permutedTour = optimalTour;
+            
+            if (permutedTour.size() > 3) {
+                shuffle(permutedTour.begin() + 1, permutedTour.end() - 1, gen);
+            }
+
+            double distance = calculateTourDistance(permutedTour, distMatrix);
+            if (distance > optimalPath.distance * 1.15) {
+                PathOption altPath;
+                altPath.warehouseId = warehouseId;
+                altPath.distance = distance;
+                for (int idx : permutedTour) {
+                    altPath.path.push_back(deliveryNodes[idx]);
+                }
+                alternatives.push_back(altPath);
+            }
+        }
+
+        // Strategy 2: Reverse tour
+        if (alternatives.size() < numAlternatives + 1 && optimalTour.size() > 3) {
+            vector<int> reversedTour = {optimalTour[0]};
+            for (int i = optimalTour.size() - 2; i > 0; i--) {
+                reversedTour.push_back(optimalTour[i]);
+            }
+            reversedTour.push_back(optimalTour.back());
+
+            double distance = calculateTourDistance(reversedTour, distMatrix);
+            if (distance > optimalPath.distance * 1.1) {
+                PathOption altPath;
+                altPath.warehouseId = warehouseId;
+                altPath.distance = distance;
+                for (int idx : reversedTour) {
+                    altPath.path.push_back(deliveryNodes[idx]);
+                }
+                alternatives.push_back(altPath);
+            }
+        }
+
+        return alternatives;
+    }
 };
+
 
 void loadNodes(RoadNetwork& graph, const string& filename) {
     ifstream file(filename);
@@ -350,10 +440,7 @@ void loadEdges(RoadNetwork& graph, const string& filename) {
 
 vector<int> nearestNeighborTSP(const vector<vector<double>>& distMatrix) {
     int n = distMatrix.size();
-    
-    if (n <= 1) {
-        return {0};
-    }
+    if (n <= 1) return {0};
     
     vector<int> tour = {0};
     vector<bool> visited(n, false);
@@ -372,7 +459,6 @@ vector<int> nearestNeighborTSP(const vector<vector<double>>& distMatrix) {
         }
         
         if (closest == -1) {
-            // If we can't find a reachable node, try to find any unvisited node
             for (int j = 0; j < n; j++) {
                 if (!visited[j]) {
                     closest = j;
@@ -381,13 +467,11 @@ vector<int> nearestNeighborTSP(const vector<vector<double>>& distMatrix) {
             }
         }
         
-        if (closest == -1) break; // All nodes visited
-        
+        if (closest == -1) break;
         tour.push_back(closest);
         visited[closest] = true;
     }
     
-    // Try to complete the cycle back to the start
     if (tour.size() > 1 && distMatrix[tour.back()][0] != numeric_limits<double>::infinity()) {
         tour.push_back(0);
     }
@@ -396,12 +480,11 @@ vector<int> nearestNeighborTSP(const vector<vector<double>>& distMatrix) {
 }
 
 void twoOptOptimize(vector<int>& tour, const vector<vector<double>>& distMatrix) {
-    // Skip optimization for very small tours
     if (tour.size() <= 3) return;
     
     bool improved = true;
     int iterCount = 0;
-    const int MAX_ITER = 1000; // Limit iterations to prevent infinite loops
+    const int MAX_ITER = 1000;
     
     while (improved && iterCount < MAX_ITER) {
         improved = false;
@@ -409,19 +492,17 @@ void twoOptOptimize(vector<int>& tour, const vector<vector<double>>& distMatrix)
         
         for (int i = 1; i < tour.size()-2; i++) {
             for (int j = i+1; j < tour.size()-1; j++) {
-                // Skip if any distances are infinity
-                if (distMatrix[tour[i-1]][tour[j]] == numeric_limits<double>::infinity() ||
-                    distMatrix[tour[i]][tour[j+1]] == numeric_limits<double>::infinity() ||
-                    distMatrix[tour[i-1]][tour[i]] == numeric_limits<double>::infinity() ||
-                    distMatrix[tour[j]][tour[j+1]] == numeric_limits<double>::infinity()) {
+                double current1 = distMatrix[tour[i-1]][tour[i]];
+                double current2 = distMatrix[tour[j]][tour[j+1]];
+                double proposed1 = distMatrix[tour[i-1]][tour[j]];
+                double proposed2 = distMatrix[tour[i]][tour[j+1]];
+                
+                if (proposed1 == numeric_limits<double>::infinity() ||
+                    proposed2 == numeric_limits<double>::infinity()) {
                     continue;
                 }
                 
-                double delta = distMatrix[tour[i-1]][tour[j]] 
-                            + distMatrix[tour[i]][tour[j+1]]
-                            - distMatrix[tour[i-1]][tour[i]] 
-                            - distMatrix[tour[j]][tour[j+1]];
-                            
+                double delta = (proposed1 + proposed2) - (current1 + current2);
                 if (delta < -0.001) {
                     reverse(tour.begin()+i, tour.begin()+j+1);
                     improved = true;
@@ -429,31 +510,20 @@ void twoOptOptimize(vector<int>& tour, const vector<vector<double>>& distMatrix)
             }
         }
     }
-    
-    if (iterCount >= MAX_ITER) {
-        cout << "Warning: Two-opt optimization reached maximum iterations" << endl;
-    }
 }
 
-double calculateTourDistance(const vector<int>& tour, 
-                           const vector<vector<double>>& distMatrix) {
+double calculateTourDistance(const vector<int>& tour, const vector<vector<double>>& distMatrix) {
     double total = 0;
     for (int i = 1; i < tour.size(); i++) {
         if (distMatrix[tour[i-1]][tour[i]] != numeric_limits<double>::infinity()) {
             total += distMatrix[tour[i-1]][tour[i]];
-        } else {
-            // If there's no path between consecutive points
-            cerr << "Warning: No path between tour points " 
-                 << tour[i-1] << " and " << tour[i] << endl;
         }
     }
     return total;
 }
 
 vector<int> solveTSP(const vector<vector<double>>& distMatrix) {
-    if (distMatrix.empty()) {
-        return {};
-    }
+    if (distMatrix.empty()) return {};
     
     vector<int> tour = nearestNeighborTSP(distMatrix);
     
@@ -474,10 +544,21 @@ vector<int> solveTSP(const vector<vector<double>>& distMatrix) {
     return tour;
 }
 
+void saveRouteToFile(const string& filename, const vector<string>& route) {
+    ofstream outFile(filename);
+    if (!outFile.is_open()) {
+        cerr << "Error: Could not open " << filename << " for writing!" << endl;
+        return;
+    }
+
+    for (const string& nodeId : route) {
+        outFile << nodeId << endl;
+    }
+    outFile.close();
+    cout << "Route saved to " << filename << endl;
+}
+
 int main() {
-    // Seed the random number generator
-    srand(time(0));
-    
     RoadNetwork graph;
     
     cout << "Loading nodes..." << endl;
@@ -488,106 +569,79 @@ int main() {
     
     graph.printGraphStats();
     
-    // Define warehouse nodes for Delhi
-    // These are example OSM IDs - replace with actual IDs from your Delhi dataset
     vector<string> warehouseIds = {
-        "12110005374",  // Warehouse 1 (North Delhi)
-        "923637303",  // Warehouse 2 (East Delhi)
-        "4314376797"   // Warehouse 3 (South Delhi)
+        "12110005374",  // North Delhi
+        "923637303",    // East Delhi
+        "4314376797"    // South Delhi
     };
     
-    // Verify warehouse nodes exist
-    vector<string> validWarehouseIds;
+    vector<string> validWarehouses;
     for (const auto& id : warehouseIds) {
         if (graph.hasNode(id)) {
-            validWarehouseIds.push_back(id);
+            validWarehouses.push_back(id);
             cout << "Warehouse " << id << " is valid." << endl;
-        } else {
-            cerr << "Warning: Warehouse " << id << " not found in the graph!" << endl;
         }
     }
     
-    if (validWarehouseIds.empty()) {
-        cerr << "Error: No valid warehouses found. Exiting." << endl;
+    if (validWarehouses.empty()) {
+        cerr << "Error: No valid warehouses!" << endl;
         return 1;
     }
     
-    // Ask user for the number of delivery points
     int numDeliveries;
-    cout << "Enter the number of deliveries to make: ";
+    cout << "Enter number of deliveries: ";
     cin >> numDeliveries;
     
-    if (numDeliveries <= 0) {
-        cerr << "Error: Number of deliveries must be positive. Exiting." << endl;
-        return 1;
-    }
+    auto deliveries = graph.selectRandomDeliveryNodes(numDeliveries, validWarehouses);
+    auto assignments = graph.assignDeliveriesToWarehousesOptimized(validWarehouses, deliveries);
     
-    cout << "Selecting " << numDeliveries << " random delivery locations..." << endl;
-    vector<string> deliveryNodes = graph.selectRandomDeliveryNodes(numDeliveries, validWarehouseIds);
-    
-    if (deliveryNodes.empty()) {
-        cerr << "Error: No delivery nodes selected. Exiting." << endl;
-        return 1;
-    }
-    
-    cout << "\nSelected " << deliveryNodes.size() << " delivery nodes." << endl;
-    
-    // Assign deliveries to warehouses
-    auto assignments = graph.assignDeliveriesToWarehouses(validWarehouseIds, deliveryNodes);
-    
-    // Process each warehouse's deliveries
-    for (size_t w = 0; w < validWarehouseIds.size(); ++w) {
-        string warehouseId = validWarehouseIds[w];
-        vector<string> warehouseDeliveries = assignments[warehouseId];
+    for (const auto& warehouseId : validWarehouses) {
+        if (assignments[warehouseId].empty()) continue;
         
-        cout << "\n--- Processing Warehouse " << warehouseId << " ---" << endl;
-        cout << "Assigned " << warehouseDeliveries.size() << " deliveries" << endl;
-        
-        if (warehouseDeliveries.empty()) {
-            cout << "No deliveries assigned to this warehouse. Skipping." << endl;
-            continue;
-        }
-        
-        // Create a list with warehouse first, then deliveries
         vector<string> routeNodes = {warehouseId};
-        routeNodes.insert(routeNodes.end(), warehouseDeliveries.begin(), warehouseDeliveries.end());
+        routeNodes.insert(routeNodes.end(), 
+                         assignments[warehouseId].begin(), 
+                         assignments[warehouseId].end());
         
         cout << "\nCalculating distance matrix for warehouse " << warehouseId << "..." << endl;
         auto distanceMatrix = graph.createDistanceMatrix(routeNodes);
         
         cout << "\nSolving TSP for warehouse " << warehouseId << "..." << endl;
-        vector<int> optimalTour = solveTSP(distanceMatrix);
+        auto optimalTour = solveTSP(distanceMatrix);
         
         cout << "\nOptimal Delivery Route for Warehouse " << warehouseId << ":\n";
         for (size_t i = 0; i < optimalTour.size(); i++) {
-            int nodeIndex = optimalTour[i];
-            cout << i << ": Node " << routeNodes[nodeIndex];
-            if (i > 0) {
-                cout << " | Distance from previous: " 
-                     << distanceMatrix[optimalTour[i-1]][nodeIndex] << "m";
-            }
-            cout << endl;
+            cout << i << ": " << routeNodes[optimalTour[i]] << endl;
         }
         
-        cout << "\nTotal route distance: " 
-             << calculateTourDistance(optimalTour, distanceMatrix) 
-             << " meters" << endl;
+        double optimalDistance = calculateTourDistance(optimalTour, distanceMatrix);
+        cout << "\nTotal route distance: " << optimalDistance << " meters" << endl;
 
-        // Create output filename for this warehouse's route
-        string outputFile = "route_warehouse_" + to_string(w + 1) + ".txt";
-        ofstream outFile(outputFile);
-        if (!outFile.is_open()) {
-            cerr << "Error: Could not open " << outputFile << " for writing!" << endl;
-            continue;
-        }
-
-        // Save the route with proper OSM IDs
+        // Save optimal route
+        string optimalFile = "warehouse_" + warehouseId + "_optimal_route.txt";
+        vector<string> optimalRoute;
         for (int idx : optimalTour) {
-            outFile << routeNodes[idx] << endl;
+            optimalRoute.push_back(routeNodes[idx]);
         }
-        outFile.close();
-
-        cout << "\nRoute successfully saved to " << outputFile << endl;
+        saveRouteToFile(optimalFile, optimalRoute);
+        
+        // Generate and save alternative routes
+        cout << "\nGenerating alternative routes..." << endl;
+        auto alternatives = graph.generateAlternativeRoutes(warehouseId, routeNodes, optimalTour, distanceMatrix, 3);
+        
+        for (size_t i = 1; i < alternatives.size(); i++) {
+            string altFile = "warehouse_" + warehouseId + "_alternative_route_" + to_string(i) + ".txt";
+            cout << "Alternative " << i << " distance: " << alternatives[i].distance << " meters (" 
+                 << ((alternatives[i].distance - optimalDistance)/optimalDistance*100) << "% longer)" << endl;
+            saveRouteToFile(altFile, alternatives[i].path);
+        }
+    }
+    
+    cout << "\nRunning visualization script..." << endl;
+    string command = "python ../python/plot.py";
+    int result = system(command.c_str());
+    if (result != 0) {
+        cerr << "Error: Failed to run visualization script" << endl;
     }
     
     return 0;
