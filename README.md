@@ -51,13 +51,8 @@ route_optimization\algorithm\cpp>
 ```bash
 g++ main.cpp && .\a.exe
 ```
-This generates route files in the current directory or specified outputs/ folder.
+This generates route files in the current directory or specified outputs/ folder and generates delhi_delivery_routes.html and opens it in your default web browser.
 
-**Step 2:** Visualize (Python)
-```bash
-python plot.py
-```
-This generates delhi_delivery_routes.html and opens it in your default web browser.
 
 ##  Map Output
 
